@@ -16,3 +16,8 @@ Learn about parsing, and practice my C skills.
 
 I am writing a lot of Rust code, and I've always wanted to learn C. Might also
 implement this in Rust and compare the two implementations performance wise.
+
+## How to build and run
+
+* Build: `make`
+* Run: `./jp -f /path/to/file.json`
