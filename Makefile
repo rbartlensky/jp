@@ -1,6 +1,6 @@
 OUT = build
 
-all : jp
+all: jp
 
 jp: src/*.c
 	gcc -o ./jp $? -I ./include

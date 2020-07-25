@@ -1,22 +1,11 @@
+#define _GNU_SOURCE
+
 #include "json.h"
+#include "backtrace.h"
 
 #define SKIP_WHITESPACE(ctx) if (consume_whitespace(ctx) == EARLY_EOF) { \
                 fprintf(stderr, "Incomplete JSON?"); \
                 return INVALID; \
-        }
-
-#define MATCH_SEQUENCE(str, len) switch(match_sequence(ctx, str, len, &matched)) { \
-        case OK: \
-                return OK; \
-        case EARLY_EOF: \
-        case INVALID: \
-                if (matched > 0) { \
-                        fprintf(stderr, "Failed to match %s at line: %d, col: %d\n", str, ctx->line, ctx->col); \
-                        ctx->col -= matched; \
-                        return INVALID; \
-                } \
-        default: \
-                break; \
         }
 
 static char HEX_CHARS[22] = {
@@ -34,6 +23,7 @@ typedef struct Context {
         int line;
         int col;
         FILE *fd;
+        Backtrace bt;
 } Context;
 
 static int consume_whitespace(Context *ctx) {
@@ -82,8 +72,6 @@ static int test_status(int status, char c, Context *ctx) {
         switch (status) {
         case EARLY_EOF:
         case INVALID:
-                fprintf(stderr, "Failed to match '%c' at line: %d, col: %d\n",
-                        c, ctx->line, ctx->col);
                 return INVALID;
         default:
                 return 0;
@@ -103,7 +91,6 @@ static int consume_any(Context *ctx, char *chars, int start, int len) {
 static int match_number(Context *ctx) {
         if (consume_char(ctx, '-') == OK) {
                 if (consume_any(ctx, DIGITS, 1, sizeof(DIGITS)) != OK) {
-                        fprintf(stderr, "Wrong char after '-' at line: %d, col: %d\n", ctx->line, ctx->col);
                         return INVALID;
                 }
                 while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
@@ -184,6 +171,10 @@ static int match_sequence(Context *ctx, char *val, int len, int *matched) {
         for (i = 0; i < len; ++i) {
                 if (consume_char(ctx, val[i]) != OK) {
                         *matched = i;
+                        char *msg;
+                        asprintf(&msg, "Failed to match \"%s\" at line: %d, col: %d",
+                                 val, ctx->line, ctx->col);
+                        bt_push(&ctx->bt, msg);
                         return INVALID;
                 }
         }
@@ -195,9 +186,6 @@ static int match_value(Context *ctx);
 
 static int match_json_body(Context *ctx) {
         if (match_string(ctx) != OK) {
-                fprintf(stderr,
-                        "failed to match string at line: %d, col: %d\n",
-                        ctx->line, ctx->col);
                 return INVALID;
         }
         SKIP_WHITESPACE(ctx);
@@ -206,9 +194,11 @@ static int match_json_body(Context *ctx) {
         }
         SKIP_WHITESPACE(ctx);
         if (match_value(ctx) != OK) {
-                fprintf(stderr,
-                        "failed to match value at line: %d, col: %d\n",
-                        ctx->line, ctx->col);
+                char *err;
+                asprintf(&err, "Failed to match value at line: %d, col: %d",
+                         ctx->line,
+                         ctx->col);
+                bt_push(&ctx->bt, err);
                 return INVALID;
         }
         SKIP_WHITESPACE(ctx);
@@ -216,9 +206,6 @@ static int match_json_body(Context *ctx) {
                 return OK;
         }
         if (consume_char(ctx, ',') != OK) {
-                fprintf(stderr,
-                        "failed to match ',' or '}' at line: %d, col: %d\n",
-                        ctx->line, ctx->col);
                 return INVALID;
         }
         SKIP_WHITESPACE(ctx);
@@ -239,9 +226,6 @@ static int match_object(Context *ctx) {
 
 static int match_array_body(Context *ctx) {
         if (match_value(ctx) != OK) {
-                fprintf(stderr,
-                        "failed to match value at line: %d, col: %d\n",
-                        ctx->line, ctx->col);
                 return INVALID;
         }
         SKIP_WHITESPACE(ctx);
@@ -249,9 +233,6 @@ static int match_array_body(Context *ctx) {
                 return OK;
         }
         if (consume_char(ctx, ',') != OK) {
-                fprintf(stderr,
-                        "failed to match ',' or ']' at line: %d, col: %d\n",
-                        ctx->line, ctx->col);
                 return INVALID;
         }
         SKIP_WHITESPACE(ctx);
@@ -270,33 +251,53 @@ static int match_array(Context *ctx) {
 }
 
 static int match_value(Context *ctx) {
-        if (match_string(ctx) == OK) {
-                return OK;
-        }
-        if (match_object(ctx) == OK) {
-                return OK;
-        }
-        if (match_number(ctx) == OK) {
-                return OK;
-        }
-        if (match_array(ctx) == OK) {
-                return OK;
+        static int (*matchers[4])(Context*) = { match_string, match_object, match_number, match_array};
+        int old_len = ctx->bt.len;
+        int i;
+        for (i = 0; i < 4; ++i) {
+                if (matchers[i](ctx) == OK) {
+                        while (old_len < ctx->bt.len) {
+                                bt_pop(&ctx->bt);
+                        }
+                        return OK;
+                }
         }
         int matched = 0;
-        MATCH_SEQUENCE("true", 4);
-        MATCH_SEQUENCE("false", 5);
-        MATCH_SEQUENCE("null", 4);
+        static char *strs[3] = { "true", "false", "null" };
+        static int lens[3] = { 4, 5, 4 };
+        for (i = 0; i < 3; ++i) {
+                switch(match_sequence(ctx, strs[i], lens[i], &matched)) {
+                case OK:
+                        while (old_len < ctx->bt.len) {
+                                bt_pop(&ctx->bt);
+                        }
+                        return OK;
+                case EARLY_EOF:
+                case INVALID:
+                        if (matched > 0) {
+                                ctx->col -= matched;
+                                return INVALID;
+                        }
+                default:
+                        break;
+                }
+        }
         return INVALID;
 }
 
 int jp_check(FILE *fd) {
-        Context ctx = { 1, 0, fd };
+        Backtrace bt = bt_new();
+        Context ctx = { 1, 0, fd, bt };
         // XXX: is an empty file a valid json?
         if (consume_whitespace(&ctx) == EARLY_EOF) {
+                bt_free(&ctx.bt);
                 return 0;
         }
         if (match_object(&ctx) != OK) {
+                bt_print(&ctx.bt);
+                bt_free(&ctx.bt);
                 return JP_BAD_JSON;
         }
+        bt_free(&ctx.bt);
         return 0;
 }
