@@ -3,7 +3,7 @@ OUT = build
 all: jp
 
 jp: src/*.c
-	gcc -o ./jp $? -I ./include
+	gcc -O3 -o ./jp $? -I ./include
 
 clean:
 	rm ./jp

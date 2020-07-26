@@ -95,9 +95,10 @@ static int match_number(Context *ctx) {
                 }
                 while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
         } else {
-                if (consume_char(ctx, '0') != OK) {
+                if (consume_char(ctx, '0') != OK && consume_any(ctx, DIGITS, 1, sizeof(DIGITS)) != OK) {
                         return INVALID;
                 }
+                while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
         }
         if (consume_char(ctx, '.') == OK) {
                 while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
@@ -296,6 +297,7 @@ int jp_check(FILE *fd) {
         if (match_object(&ctx) != OK) {
                 bt_print(&ctx.bt);
                 bt_free(&ctx.bt);
+                printf("CTX: line: %d, col: %d\n", ctx.line, ctx.col);
                 return JP_BAD_JSON;
         }
         bt_free(&ctx.bt);
