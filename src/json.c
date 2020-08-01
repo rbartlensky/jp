@@ -2,48 +2,40 @@
 
 #include "json.h"
 #include "backtrace.h"
+#include "buf_reader.h"
 
 #define SKIP_WHITESPACE(ctx) if (consume_whitespace(ctx) == EARLY_EOF) { \
                 fprintf(stderr, "Incomplete JSON?"); \
                 return INVALID; \
         }
 
-static char HEX_CHARS[22] = {
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a',
-        'A', 'b', 'B', 'c', 'C', 'd', 'D', 'e', 'E', 'f', 'F'
-};
-
-static char DIGITS[10] = {
-        '0', '1', '2', '3', '4', '5', '6', '7', '8', '9'
-};
-
 enum INTERNAL_ERROR { OK = 0, EARLY_EOF = 1, INVALID = -1 };
 
 typedef struct Context {
         int line;
         int col;
-        FILE *fd;
+        BufReader br;
         Backtrace bt;
 } Context;
 
 static int consume_whitespace(Context *ctx) {
         char c;
-        while ((c = fgetc(ctx->fd))) {
+        while ((c = buf_peek(&ctx->br))) {
                 switch (c) {
                 case '\n':
                         ctx->line++;
                         ctx->col = 0;
+                        buf_getc(&ctx->br);
                         break;
                 case '\t':
                 case '\r':
                 case ' ':
                         ctx->col++;
+                        buf_getc(&ctx->br);
                         break;
                 case EOF:
                         return EARLY_EOF;
                 default:
-                        // put the non-whitespace char back
-                        ungetc(c, ctx->fd);
                         return OK;
                 };
         }
@@ -52,20 +44,19 @@ static int consume_whitespace(Context *ctx) {
 
 static int consume_char(Context *ctx, char to_consume) {
         char c;
-        while ((c = fgetc(ctx->fd))) {
+        while ((c = buf_peek(&ctx->br))) {
                 if (c == to_consume) {
                         ctx->col++;
+                        buf_getc(&ctx->br);
                         return OK;
                 }
                 switch (c) {
                 case EOF:
                         return EARLY_EOF;
                 default:
-                        ungetc(c, ctx->fd);
                         return INVALID;
                 };
         }
-        return OK;
 }
 
 static int test_status(int status, char c, Context *ctx) {
@@ -78,37 +69,57 @@ static int test_status(int status, char c, Context *ctx) {
         }
 }
 
-static int consume_any(Context *ctx, char *chars, int start, int len) {
-        int i;
-        for (i = start; i < len; ++i) {
-                if (consume_char(ctx, HEX_CHARS[i]) == OK) {
-                        return OK;
-                }
+static int consume_hex(Context *ctx) {
+        char c = buf_peek(&ctx->br);
+        if (c >= '0'  && c <= '9' || c >= 'a' && c <= 'f' || c >= 'A' && c <= 'F') {
+                buf_getc(&ctx->br);
+                return OK;
+        } else {
+                return INVALID;
         }
-        return INVALID;
+}
+
+static int consume_positive_digit(Context *ctx) {
+        char c = buf_peek(&ctx->br);
+        if (c >= '1'  && c <= '9') {
+                buf_getc(&ctx->br);
+                return OK;
+        } else {
+                return INVALID;
+        }
+}
+
+static int consume_digit(Context *ctx) {
+        char c = buf_peek(&ctx->br);
+        if (c >= '0'  && c <= '9') {
+                buf_getc(&ctx->br);
+                return OK;
+        } else {
+                return INVALID;
+        }
 }
 
 static int match_number(Context *ctx) {
         if (consume_char(ctx, '-') == OK) {
-                if (consume_any(ctx, DIGITS, 1, sizeof(DIGITS)) != OK) {
+                if (consume_positive_digit(ctx) != OK) {
                         return INVALID;
                 }
-                while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
+                while (consume_digit(ctx) == OK);
         } else {
-                if (consume_char(ctx, '0') != OK && consume_any(ctx, DIGITS, 1, sizeof(DIGITS)) != OK) {
+                if (consume_char(ctx, '0') != OK && consume_positive_digit(ctx) != OK) {
                         return INVALID;
                 }
-                while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
+                while (consume_digit(ctx) == OK);
         }
         if (consume_char(ctx, '.') == OK) {
-                while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
+                while (consume_digit(ctx) == OK);
         }
         if (consume_char(ctx, 'E') == OK || consume_char(ctx, 'e') == OK) {
                 if (consume_char(ctx, '-') != OK) {
                         // don't really care what the output is
                         consume_char(ctx, '+');
                 }
-                while (consume_any(ctx, DIGITS, 0, sizeof(DIGITS)) == OK);
+                while (consume_digit(ctx) == OK);
         }
         return OK;
 }
@@ -120,7 +131,7 @@ static int match_string(Context *ctx) {
         if ((status = test_status(consume_char(ctx, '"'), '"', ctx)) != OK) {
                 return status;
         }
-        while ((c = fgetc(ctx->fd))) {
+        while ((c = buf_peek(&ctx->br))) {
                 switch (c) {
                 case EOF:
                         return EARLY_EOF;
@@ -134,10 +145,12 @@ static int match_string(Context *ctx) {
                 case '"':
                         // we finished parsing the string
                         ctx->col++;
+                        buf_getc(&ctx->br);
                         return OK;
                 case '\\':
                         ctx->col++;
-                        c2 = fgetc(ctx->fd);
+                        buf_getc(&ctx->br);
+                        c2 = buf_peek(&ctx->br);
                         switch(c2) {
                         case '"':
                         case '\\':
@@ -148,20 +161,23 @@ static int match_string(Context *ctx) {
                         case 'r':
                         case 't':
                                 // we escaped a control char
+                                buf_getc(&ctx->br);
                                 break;
                         case 'u':
+                                buf_getc(&ctx->br);
                                 // match exactly 4 hex digits
                                 for (i = 0; i < 4; ++i) {
-                                        if (consume_any(ctx, HEX_CHARS, 0, sizeof(HEX_CHARS)) != OK) {
+                                        if (consume_hex(ctx) != OK) {
                                                 return INVALID;
                                         }
                                 }
-                                break;
+                                continue;
                         default:
                                 return INVALID;
                         }
                 default:
                         ctx->col++;
+                        buf_getc(&ctx->br);
                         break;
                 };
         }
@@ -288,7 +304,8 @@ static int match_value(Context *ctx) {
 
 int jp_check(FILE *fd) {
         Backtrace bt = bt_new();
-        Context ctx = { 1, 0, fd, bt };
+        BufReader br = buf_new(fd);
+        Context ctx = { 1, 0, br, bt };
         // XXX: is an empty file a valid json?
         if (consume_whitespace(&ctx) == EARLY_EOF) {
                 bt_free(&ctx.bt);
