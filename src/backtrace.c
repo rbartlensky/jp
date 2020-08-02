@@ -22,7 +22,6 @@ void bt_push(Backtrace* bt, char *str) {
                         fprintf(stderr, "Failed to allocate memory for backtrace.");
                         exit(1);
                 }
-                memmove(bt->bt, bt_bigger, sizeof(char*) * bt->capacity);
                 bt->capacity *= 2;
                 bt->bt = bt_bigger;
         }
