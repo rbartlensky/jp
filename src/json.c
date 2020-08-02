@@ -43,7 +43,7 @@ static int consume_whitespace(Context *ctx) {
 }
 
 static int consume_char(Context *ctx, char to_consume) {
-        char c;
+        char c, *err;
         while ((c = buf_peek(&ctx->br))) {
                 if (c == to_consume) {
                         ctx->col++;
@@ -54,6 +54,12 @@ static int consume_char(Context *ctx, char to_consume) {
                 case EOF:
                         return EARLY_EOF;
                 default:
+                        asprintf(&err, "Expected '%c', found: '%c' at line: %d, col: %d",
+                                 to_consume,
+                                 c,
+                                 ctx->line,
+                                 ctx->col);
+                        bt_push(&ctx->bt, err);
                         return INVALID;
                 };
         }
@@ -75,6 +81,12 @@ static int consume_hex(Context *ctx) {
                 buf_getc(&ctx->br);
                 return OK;
         } else {
+                char *err;
+                asprintf(&err, "Expected hex digit, found: %c at line: %d, col: %d",
+                         c,
+                         ctx->line,
+                         ctx->col);
+                bt_push(&ctx->bt, err);
                 return INVALID;
         }
 }
@@ -85,6 +97,12 @@ static int consume_positive_digit(Context *ctx) {
                 buf_getc(&ctx->br);
                 return OK;
         } else {
+                char *err;
+                asprintf(&err, "Expected digit(1-9), found: %c at line: %d, col: %d",
+                         c,
+                         ctx->line,
+                         ctx->col);
+                bt_push(&ctx->bt, err);
                 return INVALID;
         }
 }
@@ -95,6 +113,12 @@ static int consume_digit(Context *ctx) {
                 buf_getc(&ctx->br);
                 return OK;
         } else {
+                char *err;
+                asprintf(&err, "Expected digit(0-9), found: %c at line: %d, col: %d",
+                         c,
+                         ctx->line,
+                         ctx->col);
+                bt_push(&ctx->bt, err);
                 return INVALID;
         }
 }
@@ -125,7 +149,7 @@ static int match_number(Context *ctx) {
 }
 
 static int match_string(Context *ctx) {
-        char c, c2;
+        char c, c2, *err;
         int status, i;
         // match left '"'
         if ((status = test_status(consume_char(ctx, '"'), '"', ctx)) != OK) {
@@ -140,6 +164,11 @@ static int match_string(Context *ctx) {
                 case '\r':
                 case '\t':
                 case '\n':
+                        asprintf(&err,
+                                 "Control characters are not allowed at line: %d, col: %d",
+                                 ctx->line,
+                                 ctx->col);
+                        bt_push(&ctx->bt, err);
                         // controls characters are not valid in a string
                         return INVALID;
                 case '"':
@@ -173,6 +202,12 @@ static int match_string(Context *ctx) {
                                 }
                                 continue;
                         default:
+                                asprintf(&err,
+                                         "Cannot escape %c at line: %d, col: %d",
+                                         c2,
+                                         ctx->line,
+                                         ctx->col);
+                                bt_push(&ctx->bt, err);
                                 return INVALID;
                         }
                 default:
@@ -314,7 +349,6 @@ int jp_check(FILE *fd) {
         if (match_object(&ctx) != OK) {
                 bt_print(&ctx.bt);
                 bt_free(&ctx.bt);
-                printf("CTX: line: %d, col: %d\n", ctx.line, ctx.col);
                 return JP_BAD_JSON;
         }
         bt_free(&ctx.bt);

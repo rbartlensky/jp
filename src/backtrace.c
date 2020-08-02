@@ -48,6 +48,6 @@ void bt_free(Backtrace *bt) {
 void bt_print(Backtrace *bt) {
         int i;
         for (i = 0; i < bt->len; ++i) {
-                fprintf(stderr, "%d: %s\n", i, bt->bt[bt->len - i - 1]);
+                fprintf(stderr, "%d: %s\n", i, bt->bt[i]);
         }
 }
